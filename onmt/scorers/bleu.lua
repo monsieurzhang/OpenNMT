@@ -76,11 +76,19 @@ local function calculate_bleu_excludeminmax(cand, refs, N, min, max)
 
   local nbleu = {}
 
+  local m = 1
   for n = 1, N do
+    -- add smooth when there is no N-gram match
+    if correct[n] == 0 or not correct[n] then
+      m = m*0.5
+      correct[n] = m
+    end
+
     if total[n] then
       nbleu[n] = (correct[n] or 0) / total[n]
     else
-      nbleu[n] = 0
+      -- add smooth when sentences are too short
+      nbleu[n] = 1
     end
   end
 
