@@ -106,12 +106,20 @@ function Trainer:__init(args, model, dicts, firstBatch)
   self.params = {}
   self.gradParams = {}
 
-  if not onmt.train.Saver.checkpointDefined(args) then
-    self.params[1], self.gradParams[1] = model:initParams()
+  if args.dual then
+    if not onmt.train.Saver.checkpointDefined(args) then
+      self.params, self.gradParams = model:initParams()
+    else
+      self.params, self.gradParams = model:getParams()
+    end
   else
-    self.params[1], self.gradParams[1] = model:getParams()
+    if not onmt.train.Saver.checkpointDefined(args) then
+      self.params[1], self.gradParams[1] = model:initParams()
+    else
+      self.params[1], self.gradParams[1] = model:getParams()
+    end
   end
-
+  
   -- If enabled, share internal buffers to optimize for memory.
   if not self.args.disable_mem_optimization then
     if not firstBatch then
@@ -126,21 +134,23 @@ function Trainer:__init(args, model, dicts, firstBatch)
     model:enableProfiling()
   end
 
-  -- Create network replicas.
-  onmt.utils.Parallel.launch(function(idx)
-    _G.model = idx == 1 and model or onmt.utils.Tensor.deepClone(model)
+  if not args.dual then
+    -- Create network replicas.
+    onmt.utils.Parallel.launch(function(idx)
+      _G.model = idx == 1 and model or onmt.utils.Tensor.deepClone(model)
 
-    if self.params[idx] then
-      _G.params, _G.gradParams = self.params[idx], self.gradParams[idx]
-    else
-      _G.params, _G.gradParams = _G.model:getParams(true)
-    end
+      if self.params[idx] then
+        _G.params, _G.gradParams = self.params[idx], self.gradParams[idx]
+      else
+        _G.params, _G.gradParams = _G.model:getParams(true)
+      end
 
-    return idx, _G.params, _G.gradParams
-  end, function(idx, params, gradParams)
-    self.params[idx] = params
-    self.gradParams[idx] = gradParams
-  end)
+      return idx, _G.params, _G.gradParams
+    end, function(idx, params, gradParams)
+      self.params[idx] = params
+      self.gradParams[idx] = gradParams
+    end)
+  end
 end
 
 function Trainer:eval(data)
@@ -417,6 +427,91 @@ function Trainer:train(trainData, validData, trainStates)
     -- Reset batch ordering for the next epoch.
     batchOrder = nil
     self.args.start_iteration = 1
+  end
+end
+
+function Trainer:train_dual_first(trainData_batch, batch_r, n_best_backup)
+  local optim = self.optim
+
+  local index_k_batch = 1
+  local avg_tensor = {}
+  local sum_r = 0
+  
+  for index_k_batch = 1, n_best_backup do
+    optim:zeroGrad(self.gradParams) -- core
+    local loss, indvAvgLoss = self.model:trainNetwork(trainData_batch[index_k_batch])
+    
+    if index_k_batch == 1 then
+      for k, _ in ipairs(self.gradParams) do 
+        self.gradParams[k]:mul(batch_r[index_k_batch])
+        table.insert(avg_tensor, self.gradParams[k])
+      end
+      
+      sum_r = batch_r[index_k_batch]
+    else
+      for k, _ in ipairs(self.gradParams) do 
+        self.gradParams[k]:mul(batch_r[index_k_batch])
+        avg_tensor[k]:add(self.gradParams[k])
+      end
+
+      sum_r = sum_r + batch_r[index_k_batch]
+    end
+  end
+
+  for k, _ in ipairs(avg_tensor) do 
+    -- avg_tensor[k]:div(sum_r)
+    avg_tensor[k]:div(n_best_backup)
+    self.gradParams[k]:copy(avg_tensor[k])
+  end
+
+  -- Update the parameters.
+  self.optim:prepareGrad(self.gradParams)
+  self.optim:updateParams(self.params, self.gradParams)
+ 
+end
+
+function Trainer:train_dual_second(trainData_batch, n_best_backup)
+  ----------------------------------- BA --------------------------------------------
+  local optim = self.optim
+
+  local index_k_batch = 1
+  local avg_tensor = {}
+  
+  for index_k_batch = 1, n_best_backup do
+    optim:zeroGrad(self.gradParams) -- core
+    local loss, indvAvgLoss = self.model:trainNetwork(trainData_batch[index_k_batch])
+    
+    if index_k_batch == 1 then
+      for k, _ in ipairs(self.gradParams) do 
+        table.insert(avg_tensor, self.gradParams[k])
+      end
+    else
+      for k, _ in ipairs(self.gradParams) do 
+        avg_tensor[k]:add(self.gradParams[k])
+      end
+    end
+  end
+
+  for k, _ in ipairs(avg_tensor) do 
+    avg_tensor[k]:div(n_best_backup)
+    self.gradParams[k]:copy(avg_tensor[k])
+  end
+
+  -- Update the parameters.
+  self.optim:prepareGrad(self.gradParams)
+  self.optim:updateParams(self.params, self.gradParams)
+end
+
+function Trainer:eval_and_save(opt, validData, suffix, flag_save)
+  local validPpl = self:eval(validData)
+
+  _G.logger:info('Validation perplexity' .. suffix .. ': %.2f', validPpl)
+
+  if flag_save == true then
+    local epochState = onmt.train.EpochState.new(opt.start_epoch, 1)
+
+    local filePath = self.saver:saveEpoch(validPpl, epochState)
+    os.rename(filePath, filePath .. suffix)
   end
 end
 
