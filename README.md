@@ -1,75 +1,35 @@
-[![Build Status](https://api.travis-ci.org/OpenNMT/OpenNMT.svg?branch=master)](https://travis-ci.org/OpenNMT/OpenNMT) [![codecov](https://codecov.io/gh/OpenNMT/OpenNMT/branch/master/graph/badge.svg)](https://codecov.io/gh/OpenNMT/OpenNMT)
+# Dual Learning for Machine Translation
 
-# OpenNMT: Open-Source Neural Machine Translation
+This is an unofficial implementation based on [Dual Learning for Machine Translation](https://papers.nips.cc/paper/6469-dual-learning-for-machine-translation.pdf) upon [OpenNMT](http://opennmt.net/).
 
-[OpenNMT](http://opennmt.net/) is a full-featured, open-source (MIT) neural machine translation system utilizing the [Torch](http://torch.ch) mathematical toolkit.
+The whole workflow works like:
 
-<center style="padding: 40px"><img width="70%" src="http://opennmt.github.io/simple-attn.png" /></center>
-
-The system is designed to be simple to use and easy to extend, while
-maintaining efficiency and state-of-the-art translation
-accuracy. Features include:
-
-* Speed and memory optimizations for high-performance GPU training.
-* Simple general-purpose interface, only requires and source/target data files.
-* [C++ implementation of the translator](https://github.com/OpenNMT/CTranslate) for easy deployment.
-* Extensions to allow other sequence generation tasks such as summarization and image captioning.
-
-## Installation
-
-OpenNMT only requires a Torch installation with few dependencies.
-
-1. [Install Torch](http://torch.ch/docs/getting-started.html)
-2. Install additional packages:
-
-```bash
-luarocks install tds
-```
-
-For other installation methods including Docker, visit the [documentation](http://opennmt.net/OpenNMT/installation/).
+* Read raw sentences (from language A)
+* Translate with model A-->B to get K-best translations (in language B)
+* Translate with model B-->A to get 1-best translation (in language A)
+* Build batches to feed into trainer (all together K batches)
+* Train model A-->B with averaged gradient calculated based on K batches
+* Train model B-->A with averaged gradient calculated based on K batches
+* Read raw sentences (from language B)
+* iterate as above mentioned
 
 ## Quickstart
 
-OpenNMT consists of three commands:
+```
+./run.dual.sh
+```
+to see the training on demo data.
+
+## Notes
 
 1) Preprocess the data.
 
-```
-th preprocess.lua -train_src data/src-train.txt -train_tgt data/tgt-train.txt -valid_src data/src-val.txt -valid_tgt data/tgt-val.txt -save_data data/demo
-```
+We provide several scripts (./tools/scripts) to create the preprocessed data. We need to filter raw sentences (e.g. remove sentences with more than one <unk>), sort and randomize batch sentences, and add mono-lingual data into preprocessed file. In this demo, we do not add mono-lingual data here.
 
 2) Train the model.
 
-```
-th train.lua -data data/demo-train.t7 -save_model model
-```
+We use two GPUs to help decoding and training. Specially, GPU1 is used for decoder_ab & trainer_ab, GPU2 is used for decoder_ba & trainer_ba. We set the batch_size to 32, which can be hold in 8G memory. We use SGD as default optimizer and set a small learning rate (0.01). K-best translation is set to 2. You may refer to ./run.dual.sh for details.
 
-3) Translate sentences.
+3) Performance.
 
-```
-th translate.lua -model model_final.t7 -src data/src-test.txt -output pred.txt
-```
-
-For more details, visit the [documentation](http://opennmt.net/OpenNMT/).
-
-## Citation
-
-A [technical report](https://arxiv.org/abs/1701.02810) on OpenNMT is available. If you use the system for academic work, please cite:
-
-```
-@ARTICLE{2017opennmt,
-  author = {{Klein}, G. and {Kim}, Y. and {Deng}, Y. and {Senellart}, J. and {Rush}, A.~M.},
-  title = "{OpenNMT: Open-Source Toolkit for Neural Machine Translation}",
-  journal = {ArXiv e-prints},
-  eprint = {1701.02810}
-}
-```
-
-## Additional resources
-
-* [Documentation](http://opennmt.net/OpenNMT)
-* [Example models](http://opennmt.net/Models)
-* [Forum](http://forum.opennmt.net)
-* [Gitter channel](https://gitter.im/OpenNMT/openmt)
-* [Live demo](https://demo-pnmt.systran.net)
-* [Bibliography](http://opennmt.net/about)
+We use both log P and BLEU score as the reward function. In the case of BLEU, the performance (evaluated by ppl. based on validation set) increases a little and then begins to decrease. The training speed is slow since there needs (1+K)*2*decode_whole_training_set+(1+1)*2*training. There is no parallelization at this time.
